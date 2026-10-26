@@ -1,3 +1,5 @@
+import { classifyHand } from './gesture.mjs?v=2';
+
 const $ = s => document.querySelector(s);
 const canvas=$('#scene'),ctx=canvas.getContext('2d');
 const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -38,11 +40,119 @@ canvas.onpointerup=e=>{if(!pointer||e.pointerId!==pointer.id)return;pointer=null
 canvas.addEventListener('wheel',e=>{e.preventDefault();zoom=clamp(zoom-e.deltaY*.001,.65,1.55)},{passive:false});
 addEventListener('keydown',e=>{if(e.code==='Space'&&!$('#photo-dialog').open&&!['BUTTON','INPUT'].includes(document.activeElement.tagName)){e.preventDefault();setSpread(targetSpread>.5?0:1)}});
 $('#fullscreen').onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await document.documentElement.requestFullscreen()}catch{toast('当前浏览器未开放全屏，可使用浏览器全屏按钮')}};
-let toastTimer;function toast(message){$('#toast').textContent=message;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),4500)}
+let toastTimer;function toast(message,duration=4500){$('#toast').textContent=message;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),duration)}
 $('#photos').onclick=()=>$('#photo-input').click();
 $('#photo-input').onchange=async e=>{const files=[...e.target.files].slice(0,16);if(!files.length)return;const images=[];for(const file of files){if(!file.type.startsWith('image/'))continue;if(file.size>25*1024*1024){toast('已跳过超过 25 MB 的照片');continue}try{const bitmap=await createImageBitmap(file),c=document.createElement('canvas'),ratio=Math.min(1,1200/Math.max(bitmap.width,bitmap.height));c.width=Math.max(1,Math.round(bitmap.width*ratio));c.height=Math.max(1,Math.round(bitmap.height*ratio));c.getContext('2d').drawImage(bitmap,0,0,c.width,c.height);bitmap.close();const im=new Image();im.src=c.toDataURL('image/jpeg',.88);await im.decode();images.push(im)}catch{toast('有照片未能读取，请选择 JPG、PNG 或 WebP 图片')}}if(images.length){photos=images.map((image,i)=>({image,phase:i/images.length*Math.PI*2,y:(i%4)*.87-1.35}));setSpread(1);toast(`已放入 ${images.length} 张照片，仅保留在本次页面中`)}e.target.value=''};
 let detector=null,stream=null,cameraBusy=false,cameraGeneration=0,inferenceTimer=null,lastVideoTime=-1,lastGesture='',gestureFrames=0,pinchWasDown=false,lastPinch=0;
-function stopCamera(){cameraGeneration++;if(inferenceTimer)clearTimeout(inferenceTimer);inferenceTimer=null;stream?.getTracks().forEach(t=>t.stop());stream=null;$('#camera').srcObject=null;$('.camera-panel').hidden=true;$('#camera-toggle').innerHTML='<span>◎</span> 开启手势';$('#camera-toggle').disabled=false;cameraBusy=false;lastGesture='';gestureFrames=0;pinchWasDown=false;$('#hint').textContent='也可以点击画面切换，拖动旋转，滚轮缩放'}
-$('#camera-toggle').onclick=async()=>{if(stream||cameraBusy){stopCamera();return}if(!navigator.mediaDevices?.getUserMedia){toast('请通过 localhost 或 HTTPS 打开页面，再使用摄像头');return}const generation=++cameraGeneration;cameraBusy=true;$('#camera-toggle').disabled=true;$('#camera-toggle').textContent='正在加载手势…';try{const media=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'},audio:false});if(generation!==cameraGeneration){media.getTracks().forEach(t=>t.stop());return}stream=media;$('#camera').srcObject=media;await $('#camera').play();$('.camera-panel').hidden=false;if(!detector){const {HandLandmarker,FilesetResolver}=await import('./vendor/vision_bundle.mjs');const vision=await FilesetResolver.forVisionTasks('./vendor/wasm');const options={baseOptions:{modelAssetPath:'./vendor/hand_landmarker.task',delegate:'GPU'},runningMode:'VIDEO',numHands:1,minHandDetectionConfidence:.5,minTrackingConfidence:.5};try{detector=await HandLandmarker.createFromOptions(vision,options)}catch{options.baseOptions.delegate='CPU';detector=await HandLandmarker.createFromOptions(vision,options)}}if(generation!==cameraGeneration)return;cameraBusy=false;$('#camera-toggle').disabled=false;$('#camera-toggle').textContent='◎ 关闭手势';$('#hint').textContent='将一只手完整放入镜头：张开散开，握拳聚拢，捏合查看照片';lastVideoTime=-1;detectHands(generation)}catch(error){if(generation!==cameraGeneration)return;stopCamera();const messages={NotAllowedError:'摄像头权限未开启，可在浏览器地址栏中允许后重试',NotFoundError:'未找到摄像头，仍可使用鼠标和触屏操作',NotReadableError:'摄像头正在被其他应用占用，请关闭占用后重试'};toast(messages[error.name]||'手势模型加载失败，请刷新页面重试；鼠标和触屏仍可使用');console.error('Hand control:',error)}};
-function detectHands(generation){if(!stream||generation!==cameraGeneration)return;try{const video=$('#camera');if(video.readyState>=2&&video.currentTime!==lastVideoTime){lastVideoTime=video.currentTime;const result=detector.detectForVideo(video,performance.now()),lm=result.landmarks?.[0];if(lm){const dist=(a,b)=>Math.hypot(lm[a].x-lm[b].x,lm[a].y-lm[b].y),palm=dist(0,9),pinch=dist(4,8)/Math.max(palm,.02),open=[8,12,16,20].filter(i=>dist(i,0)>dist(i-2,0)*1.17).length;const gesture=pinch<.26?'pinch':open>=3?'open':open<=1?'fist':'move';if(gesture===lastGesture)gestureFrames++;else{lastGesture=gesture;gestureFrames=1}if(gestureFrames>=3){if(gesture==='open'){setSpread(1);$('#camera-state').textContent='✧ 张开 · 星光散开'}else if(gesture==='fist'){setSpread(0);$('#camera-state').textContent='✦ 握拳 · 聚拢成树'}else if(gesture==='pinch'){if(!pinchWasDown&&performance.now()-lastPinch>1800&&!$('#photo-dialog').open){openPhoto(photoCursor%photos.length);lastPinch=performance.now()}$('#camera-state').textContent='▧ 捏合 · 珍藏瞬间'}else $('#camera-state').textContent='手掌已识别';pinchWasDown=gesture==='pinch'}if(!$('#photo-dialog').open)targetRotation+=(.5-lm[9].x)*.07}else{$('#camera-state').textContent='请将手掌放入镜头';lastGesture='';gestureFrames=0;pinchWasDown=false}}inferenceTimer=setTimeout(()=>detectHands(generation),85)}catch(error){console.error('Hand tracking:',error);stopCamera();toast('手势识别中断，可重新开启；鼠标和触屏仍可使用')}}
-addEventListener('pagehide',()=>{stopCamera();detector?.close()});document.addEventListener('visibilitychange',()=>{if(document.hidden&&(stream||cameraBusy))stopCamera()});
+const cameraButton=$('#camera-toggle'),cameraPanel=$('.camera-panel'),cameraState=$('#camera-state'),hint=$('#hint'),video=$('#camera');
+
+function cameraHelp(error){
+  const message=String(error?.message||'').toLowerCase();
+  if(error?.name==='NotAllowedError'&&message.includes('system'))return '系统已阻止浏览器使用摄像头。macOS：系统设置 → 隐私与安全性 → 相机，开启当前浏览器后完全退出并重开。';
+  if(error?.name==='NotAllowedError')return '摄像头权限被关闭。请点地址栏左侧的网站设置，将“摄像头”改为允许，然后刷新页面。';
+  if(error?.name==='NotFoundError')return '没有检测到摄像头，请连接摄像头后重试。';
+  if(error?.name==='NotReadableError')return '摄像头正被其他应用占用，请关闭占用摄像头的应用后重试。';
+  if(error?.name==='SecurityError')return '当前浏览器限制了摄像头，请用 Chrome 或 Safari 打开这个 HTTPS 页面。';
+  return '手势模型启动失败，请刷新页面重试；如果仍失败，请用最新版 Chrome 或 Safari。';
+}
+
+function stopCamera({keepHint=false}={}){
+  cameraGeneration++;
+  if(inferenceTimer)clearTimeout(inferenceTimer);
+  inferenceTimer=null;
+  stream?.getTracks().forEach(track=>track.stop());
+  stream=null;
+  video.srcObject=null;
+  cameraPanel.hidden=true;
+  cameraButton.innerHTML='<span>◎</span> 开启手势';
+  cameraButton.disabled=false;
+  cameraBusy=false;
+  lastGesture='';
+  gestureFrames=0;
+  pinchWasDown=false;
+  if(!keepHint)hint.textContent='也可以点击画面切换，拖动旋转，滚轮缩放';
+}
+
+cameraButton.onclick=async()=>{
+  if(stream||cameraBusy){stopCamera();return}
+  if(!navigator.mediaDevices?.getUserMedia){
+    const message='当前浏览器没有开放摄像头接口，请用 Chrome 或 Safari 打开这个 HTTPS 页面。';
+    hint.textContent=message;toast(message,9000);return;
+  }
+  const generation=++cameraGeneration;
+  cameraBusy=true;
+  cameraButton.disabled=true;
+  cameraButton.textContent='正在请求摄像头…';
+  hint.textContent='请在浏览器提示中允许摄像头；画面只在本机识别，不会上传。';
+  try{
+    const media=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:640},height:{ideal:480},facingMode:{ideal:'user'}},audio:false});
+    if(generation!==cameraGeneration){media.getTracks().forEach(track=>track.stop());return}
+    stream=media;
+    video.srcObject=media;
+    await video.play();
+    cameraPanel.hidden=false;
+    cameraState.textContent='正在加载手势模型…';
+    cameraButton.textContent='正在加载手势…';
+    if(!detector){
+      const {HandLandmarker,FilesetResolver}=await import('./vendor/vision_bundle.mjs');
+      const vision=await FilesetResolver.forVisionTasks('./vendor/wasm');
+      const options={baseOptions:{modelAssetPath:'./vendor/hand_landmarker.task',delegate:'GPU'},runningMode:'VIDEO',numHands:1,minHandDetectionConfidence:.45,minHandPresenceConfidence:.45,minTrackingConfidence:.45};
+      try{detector=await HandLandmarker.createFromOptions(vision,options)}catch(gpuError){
+        console.warn('GPU hand model unavailable, using CPU:',gpuError);
+        options.baseOptions.delegate='CPU';
+        detector=await HandLandmarker.createFromOptions(vision,options);
+      }
+    }
+    if(generation!==cameraGeneration)return;
+    cameraBusy=false;
+    cameraButton.disabled=false;
+    cameraButton.textContent='◎ 关闭手势';
+    cameraState.textContent='请将一只手完整放入镜头';
+    hint.textContent='手掌正对镜头：张开散开，握拳聚拢，拇指食指捏合查看照片';
+    lastVideoTime=-1;
+    detectHands(generation);
+  }catch(error){
+    if(generation!==cameraGeneration)return;
+    const message=cameraHelp(error);
+    stopCamera({keepHint:true});
+    hint.textContent=message;
+    toast(message,10000);
+    console.error('Hand control:',error);
+  }
+};
+
+function detectHands(generation){
+  if(!stream||generation!==cameraGeneration)return;
+  try{
+    if(video.readyState>=2&&video.currentTime!==lastVideoTime){
+      lastVideoTime=video.currentTime;
+      const result=detector.detectForVideo(video,performance.now()),lm=result.landmarks?.[0];
+      if(lm){
+        const {gesture,extended}=classifyHand(lm);
+        if(gesture===lastGesture)gestureFrames++;else{lastGesture=gesture;gestureFrames=1}
+        if(gestureFrames>=2){
+          if(gesture==='open'){setSpread(1);cameraState.textContent=`✧ 张开 · 星光散开（${extended}/4）`}
+          else if(gesture==='fist'){setSpread(0);cameraState.textContent='✦ 握拳 · 聚拢成树'}
+          else if(gesture==='pinch'){
+            if(!pinchWasDown&&performance.now()-lastPinch>1200&&!$('#photo-dialog').open){openPhoto(photoCursor%photos.length);lastPinch=performance.now()}
+            cameraState.textContent='▧ 捏合 · 珍藏瞬间';
+          }else cameraState.textContent='手掌已识别 · 请张开、握拳或捏合';
+          pinchWasDown=gesture==='pinch';
+        }
+        if(!$('#photo-dialog').open)targetRotation+=(.5-lm[9].x)*.07;
+      }else{
+        cameraState.textContent='没有识别到手 · 请后退一点并保持光线充足';
+        lastGesture='';gestureFrames=0;pinchWasDown=false;
+      }
+    }
+    inferenceTimer=setTimeout(()=>detectHands(generation),70);
+  }catch(error){
+    console.error('Hand tracking:',error);
+    stopCamera({keepHint:true});
+    hint.textContent='手势识别中断，请关闭其他占用摄像头的应用并重新开启。';
+    toast('手势识别中断，可重新开启；鼠标和触屏仍可使用',8000);
+  }
+}
+
+addEventListener('pagehide',()=>{stopCamera();detector?.close()});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&(stream||cameraBusy))stopCamera()});
